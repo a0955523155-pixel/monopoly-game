@@ -42,7 +42,6 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 🌟 修正大廳讀取邏輯：不使用 where，避免 Firebase 新專案索引延遲，直接本地過濾
   useEffect(() => {
     if (activeRoomId || !user || authStatus !== 'success') return;
     const q = collection(db, 'artifacts', APP_ID, 'public', 'data', GAME_COLLECTION);
@@ -54,8 +53,7 @@ export default function App() {
       });
       rooms.sort((a,b)=>parseInt(a.roomId)-parseInt(b.roomId));
       setAvailableRooms(rooms);
-    }, (e) => console.error("大廳讀取錯誤:", e));
-    
+    });
     return () => unsubscribe();
   }, [activeRoomId, user, authStatus]);
 
@@ -96,14 +94,11 @@ export default function App() {
       const myData = { uid: user.uid, name: playerName, money: 5000, pos: 0, avatar: 'dog', isReady: false, isBankrupt: false, inJail: 0, doubleCount: 0 };
 
       if (!snap.exists()) {
-        await setDoc(ref, { roomId: safeId, password: roomPassword, status: 'LOBBY', players: [myData], host: user.uid, turnIndex: 0, dice: [1, 1], properties: {}, currentAction: null });
+        await setDoc(ref, { roomId: safeId, password: roomPassword, status: 'LOBBY', players: [myData], host: user.uid, turnIndex: 0, dice: [1, 1], properties: {}, currentAction: null, actionEventId: Date.now() });
       } else {
         const d = snap.data();
-        
         const enteredPwd = targetId ? (listPassword !== null ? listPassword : "") : roomPassword;
-        if (d.password && d.password !== enteredPwd) {
-            throw new Error("房間密碼錯誤！");
-        }
+        if (d.password && d.password !== enteredPwd) throw new Error("房間密碼錯誤！");
 
         let players = [...(d.players||[])];
         const idx = players.findIndex(p => p.uid === user.uid);
@@ -157,7 +152,7 @@ export default function App() {
          if (isDouble) p.inJail = 0; 
          else {
              p.inJail -= 1; players[turnIndex] = p;
-             await updateGame({ dice: [d1, d2], players, centralMessage: { title: "探監", body: `沒骰出雙胞胎，還要關 ${p.inJail} 回合`, type: 'JAIL' } });
+             await updateGame({ dice: [d1, d2], players, centralMessage: { title: "探監", body: `沒骰出雙胞胎，還要關 ${p.inJail} 回合`, type: 'JAIL' }, actionEventId: Date.now(), sfx: 'error' });
              setTimeout(() => nextTurn(players, turnIndex), 1500);
              setIsRolling(false); rollLock.current = false; return;
          }
@@ -172,7 +167,7 @@ export default function App() {
       p.money += (passedGo ? 800 : 0);
       players[turnIndex] = p;
       
-      await updateGame({ dice: [d1, d2], players, centralMessage: null });
+      await updateGame({ dice: [d1, d2], players, centralMessage: null, sfx: 'roll' });
       setIsRolling(false); rollLock.current = false;
       setTimeout(() => handleTile(newPos, p, players, turnIndex), 800);
     }, 1200);
@@ -187,21 +182,23 @@ export default function App() {
       const propData = props[tile.id];
       if (!propData) {
         if (player.money >= tile.price) {
-           await updateGame({ currentAction: { type: 'BUY', tileId: tile.id, price: tile.price, name: tile.name }, centralMessage: { title: "出售", body: `${tile.name} $${tile.price}`, type: 'BUY' } });
+           await updateGame({ currentAction: { type: 'BUY', tileId: tile.id, price: tile.price, name: tile.name }, centralMessage: { title: "出售", body: `${tile.name} $${tile.price}`, type: 'BUY' }, actionEventId: Date.now() });
            shouldNext = false;
-        } else await updateGame({ centralMessage: { title: "過路", body: "現金不足", type: 'INFO' } });
+        } else await updateGame({ centralMessage: { title: "過路", body: "現金不足", type: 'INFO' }, actionEventId: Date.now() });
       } else if (propData.owner === user.uid) {
-        if (tile.group === 'util') {
-            await updateGame({ centralMessage: { title: "公共事業", body: "水電廠無法升級", type: 'INFO' } });
+        // 🌟 車站與水電廠不可升級
+        if (tile.group === 'util' || tile.group === 'station') {
+            await updateGame({ centralMessage: { title: "特殊地產", body: `${tile.group === 'util' ? '水電廠' : '車站'}無法升級`, type: 'INFO' }, actionEventId: Date.now() });
         } else {
             const lvl = propData.level || 0;
             if (lvl < 4) {
-                const cost = tile.price;
+                // 🌟 蓋房子成本遞增 (基底價格的 1倍, 1.5倍, 2倍, 2.5倍)
+                const cost = Math.floor(tile.price * (1 + lvl * 0.5));
                 if (player.money >= cost) {
-                    await updateGame({ currentAction: { type: 'BUILD', tileId: tile.id, price: cost, name: tile.name }, centralMessage: { title: "升級", body: `加蓋需 $${cost}`, type: 'MANAGE' } });
+                    await updateGame({ currentAction: { type: 'BUILD', tileId: tile.id, price: cost, name: tile.name, level: lvl+1 }, centralMessage: { title: "升級", body: `加蓋需 $${cost}`, type: 'MANAGE' }, actionEventId: Date.now() });
                     shouldNext = false;
-                } else await updateGame({ centralMessage: { title: "資金不足", body: `升級需 $${cost}`, type: 'INFO' } });
-            } else await updateGame({ centralMessage: { title: "滿級", body: "摩天大樓!", type: 'INFO' } });
+                } else await updateGame({ centralMessage: { title: "資金不足", body: `升級需 $${cost}`, type: 'INFO' }, actionEventId: Date.now(), sfx: 'error' });
+            } else await updateGame({ centralMessage: { title: "滿級", body: "摩天大樓!", type: 'INFO' }, actionEventId: Date.now() });
         }
       } else {
         const ownerIdx = ps.findIndex(p => p.uid === propData.owner);
@@ -216,7 +213,7 @@ export default function App() {
            } else if (tile.group === 'util') {
                const count = MAP_DATA.filter(t => t.group === 'util' && props[t.id]?.owner === propData.owner).length;
                rent = tile.rent * (count > 1 ? 2.5 : 1);
-               if (count > 1) bonusText = " (水電雙霸天!)";
+               if (count > 1) bonusText = " (雙霸天!)";
            } else {
                const multipliers = [1, 5, 15, 45, 80];
                rent = tile.rent * multipliers[lvl];
@@ -228,14 +225,14 @@ export default function App() {
            player.money -= rent;
            ps[ownerIdx].money += rent;
            ps[turnIndex] = player;
-           await updateGame({ players: ps, centralMessage: { title: "付租金", body: `給 ${ps[ownerIdx].name} $${rent}${bonusText}`, type: 'RENT' } });
+           await updateGame({ players: ps, centralMessage: { title: "付租金", body: `給 ${ps[ownerIdx].name} $${rent}${bonusText}`, type: 'RENT' }, actionEventId: Date.now(), sfx: 'money' });
            setTimeout(() => checkBankrupt(player, ps, turnIndex), 2500);
            return;
         }
       }
     } else if (tile.type === 'CHANCE') {
        const card = CHANCE_CARDS[Math.floor(Math.random() * CHANCE_CARDS.length)];
-       await updateGame({ centralMessage: { title: "機會命運", body: card.text, type: 'CHANCE' } });
+       await updateGame({ centralMessage: { title: "機會命運", body: card.text, type: 'CHANCE' }, actionEventId: Date.now(), sfx: card.amount > 0 ? 'money' : 'error' });
        setTimeout(async () => {
           player.money += card.amount;
           ps[turnIndex] = player;
@@ -246,7 +243,7 @@ export default function App() {
     } else if (tile.type === 'GOTOJAIL') {
        player.pos = 9; player.inJail = 2; player.doubleCount = 0;
        ps[turnIndex] = player;
-       await updateGame({ players: ps, centralMessage: { title: "入獄", body: "暫停 2 回合", type: 'JAIL' } });
+       await updateGame({ players: ps, centralMessage: { title: "入獄", body: "暫停 2 回合", type: 'JAIL' }, actionEventId: Date.now(), sfx: 'error' });
        shouldNext = true;
     }
 
@@ -263,19 +260,19 @@ export default function App() {
     if (type === 'YES') {
        ps[turnIndex].money -= act.price;
        props[act.tileId] = { owner: user.uid, level: act.type === 'BUY' ? 0 : (props[act.tileId]?.level || 0) + 1 };
-       await updateGame({ players: ps, properties: props, currentAction: null, centralMessage: null });
+       await updateGame({ players: ps, properties: props, currentAction: null, centralMessage: null, sfx: act.type === 'BUY' ? 'buy' : 'build' });
     } else if (type === 'SELL') {
         const lvl = props[act.tileId]?.level || 0;
         ps[turnIndex].money += Math.floor(act.price * 0.5 * (lvl+1));
         delete props[act.tileId];
-        await updateGame({ players: ps, properties: props, currentAction: null, centralMessage: null });
+        await updateGame({ players: ps, properties: props, currentAction: null, centralMessage: null, sfx: 'money' });
     } else if (type === 'BANKRUPT') {
         processBankruptcy(ps[turnIndex], ps, turnIndex);
         return;
     } else if (type === 'START_AUCTION') {
         const myProps = Object.keys(props).filter(k => props[k].owner === user.uid).sort((a,b) => (props[b].level||0) - (props[a].level||0));
         const targetId = myProps[0];
-        const tileInfo = MAP_DATA.find(t=>t.id == targetId);
+        const tileInfo = MAP_DATA.find(t=>t.id == parseInt(targetId));
         const base = Math.floor(tileInfo.price / 3);
         await updateGame({ 
             auction: { sellerUid: user.uid, tileId: targetId, tileName: tileInfo.name, currentBid: base, highestBidder: null, passedUids: [] },
@@ -292,7 +289,7 @@ export default function App() {
     if (p.money < 0) {
       const hasAssets = Object.keys(gameState.properties || {}).some(k => (gameState.properties||{})[k].owner === p.uid);
       if (!hasAssets) processBankruptcy(p, ps, turnIndex);
-      else await updateGame({ currentAction: { type: 'BANKRUPT_CHOICE' }, centralMessage: { title: "瀕臨破產", body: "你要直接破產，還是拍賣資產求生？", type: 'FAIL' } });
+      else await updateGame({ currentAction: { type: 'BANKRUPT_CHOICE' }, centralMessage: { title: "瀕臨破產", body: "你要直接破產，還是拍賣資產求生？", type: 'FAIL' }, actionEventId: Date.now(), sfx: 'error' });
     } else nextTurn(ps, turnIndex);
   };
 
@@ -300,7 +297,7 @@ export default function App() {
       p.isBankrupt = true; p.money = 0; p.doubleCount = 0; ps[turnIndex] = p;
       let props = { ...(gameState.properties||{}) };
       Object.keys(props).forEach(k => { if(props[k].owner === p.uid) delete props[k]; });
-      await updateGame({ players: ps, properties: props, currentAction: null, centralMessage: { title: "破產", body: `${p.name} 出局`, type: 'FAIL' } });
+      await updateGame({ players: ps, properties: props, currentAction: null, centralMessage: { title: "破產", body: `${p.name} 出局`, type: 'FAIL' }, actionEventId: Date.now(), sfx: 'error' });
       setTimeout(() => nextTurn(ps, turnIndex), 3500);
   }
 
@@ -310,7 +307,7 @@ export default function App() {
     let p = ps[currentTurnIdx];
 
     if (p.doubleCount > 0 && p.doubleCount <= 2 && !p.isBankrupt && !p.inJail) {
-        await updateGame({ centralMessage: { title: "雙骰加碼", body: "獲得額外一回合！", type: 'INFO' } });
+        await updateGame({ centralMessage: { title: "雙骰加碼", body: "獲得額外一回合！", type: 'INFO' }, actionEventId: Date.now() });
     } else {
         p.doubleCount = 0; ps[currentTurnIdx] = p;
         next = (currentTurnIdx + 1) % ps.length;
@@ -327,11 +324,15 @@ export default function App() {
       if(!gameState.auction) return;
       const auc = gameState.auction;
       if (action === 'BID') {
-          await updateGame({ auction: { ...auc, currentBid: auc.currentBid + 10, highestBidder: user.uid, passedUids: [] } });
+          await updateGame({ auction: { ...auc, currentBid: auc.currentBid + 10, highestBidder: user.uid, passedUids: [] }, sfx: 'buy' });
       } else if (action === 'PASS') {
           const newPassed = [...auc.passedUids, user.uid];
           const activePlayers = gameState.players.filter(p => !p.isBankrupt && p.uid !== auc.sellerUid);
-          if (newPassed.length >= activePlayers.length) {
+          
+          // 🌟 修復拍賣卡死：扣除最高出價者後，計算需要放棄的人數
+          const requiredPasses = activePlayers.length - (auc.highestBidder ? 1 : 0);
+          
+          if (newPassed.length >= requiredPasses) {
               let ps = [...gameState.players]; let props = {...gameState.properties};
               const sIdx = ps.findIndex(p => p.uid === auc.sellerUid);
               if (auc.highestBidder) {
@@ -341,7 +342,7 @@ export default function App() {
                   props[auc.tileId] = { owner: auc.highestBidder, level: 0 };
               } else delete props[auc.tileId]; 
               
-              await updateGame({ players: ps, properties: props, auction: null });
+              await updateGame({ players: ps, properties: props, auction: null, sfx: 'money' });
               if (ps[sIdx].money < 0) checkBankrupt(ps[sIdx], ps, sIdx); 
               else nextTurn(ps, sIdx);
           } else await updateGame({ auction: { ...auc, passedUids: newPassed } });
